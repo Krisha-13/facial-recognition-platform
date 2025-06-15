@@ -1,46 +1,54 @@
-# backend/face_recognition_api.py
-
 from fastapi import APIRouter, UploadFile, Form, HTTPException
-import os
-import cv2
 import numpy as np
+import cv2
 import face_recognition
+import os
 
 router = APIRouter()
-
-REGISTERED_DIR = os.path.join(os.path.dirname(__file__), "registered")
+ENCODING_PATH = os.path.join(os.path.dirname(__file__), "known_faces.npy")
 
 @router.post("/recognize-face")
 async def recognize_face(file: UploadFile = Form(...)):
     try:
-        contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # Read uploaded image
+        content = await file.read()
+        np_arr = np.frombuffer(content, np.uint8)
+        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-        if frame is None:
-            raise HTTPException(status_code=400, detail="Invalid image uploaded.")
+        # Detect and encode face(s)
+        locations = face_recognition.face_locations(image)
+        encodings = face_recognition.face_encodings(image, locations)
 
-        # Encode incoming face
-        unknown_encodings = face_recognition.face_encodings(frame)
-        if not unknown_encodings:
-            return {"message": "No face found in the image."}
+        if not encodings:
+            return {"message": "❌ No face detected", "results": []}
 
-        unknown_encoding = unknown_encodings[0]
+        # Load known face data
+        if not os.path.exists(ENCODING_PATH):
+            return {"message": "❌ No registered faces", "results": []}
 
-        # Loop through registered images
-        for filename in os.listdir(REGISTERED_DIR):
-            filepath = os.path.join(REGISTERED_DIR, filename)
-            known_image = face_recognition.load_image_file(filepath)
-            known_encodings = face_recognition.face_encodings(known_image)
+        known_data = np.load(ENCODING_PATH, allow_pickle=True).tolist()
+        known_encodings = [np.array(item["encoding"]) for item in known_data]
+        known_names = [item["name"] for item in known_data]
 
-            if not known_encodings:
-                continue
+        recognized_names = []
 
-            if face_recognition.compare_faces([known_encodings[0]], unknown_encoding)[0]:
-                name = filename.split("_")[0]
-                return {"match": True, "name": name}
+        for face_encoding in encodings:
+            # Calculate distances
+            face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+            best_match_index = np.argmin(face_distances)
+            best_distance = face_distances[best_match_index]
 
-        return {"match": False, "message": "No match found."}
+            # Match only if distance is below strict threshold
+            if best_distance < 0.45:
+                recognized_names.append(known_names[best_match_index])
+            else:
+                recognized_names.append("Unknown")
+
+            # Debug log
+            print(f"Distances: {face_distances}")
+            print(f"Best match: {known_names[best_match_index]}, Distance: {best_distance}")
+
+        return {"message": "✅ Recognized faces", "results": recognized_names}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
